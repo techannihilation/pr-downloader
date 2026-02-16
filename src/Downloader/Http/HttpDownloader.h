@@ -31,6 +31,7 @@ public:
 			    DownloadEnum::Category = DownloadEnum::CAT_NONE) override;
 	virtual bool download(std::list<IDownload*>& download,
 			      int max_parallel = 10) override;
+	virtual bool setOption(const std::string& key, const std::string& value) override;
 	void showProcess(IDownload* download, bool forceOutput);
 	static bool DownloadUrl(const std::string& url, std::string& res);
 	static bool ParseResult(const std::string& name, const std::string& json,

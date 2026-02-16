@@ -8,6 +8,7 @@
 #include <string>
 #include <sstream>
 #include <stdlib.h>
+#include <set>
 #include <vector>
 
 #ifdef _WIN32
@@ -27,6 +28,282 @@
 #include "Logger.h"
 #include "Downloader/Mirror.h"
 #include "Downloader/CurlWrapper.h"
+
+static std::string g_mapBaseUrl;
+
+static std::string NormalizeBaseUrl(std::string url)
+{
+	while (!url.empty() && std::isspace(static_cast<unsigned char>(url.back()))) {
+		url.pop_back();
+	}
+	size_t first = 0;
+	while (first < url.size() && std::isspace(static_cast<unsigned char>(url[first]))) {
+		++first;
+	}
+	if (first > 0) {
+		url.erase(0, first);
+	}
+	if (!url.empty() && url.back() != '/') {
+		url.push_back('/');
+	}
+	return url;
+}
+
+static std::string ToLowerAscii(std::string s)
+{
+	for (char& c : s) {
+		c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	}
+	return s;
+}
+
+static bool EndsWithCaseInsensitive(const std::string& value, const std::string& suffix)
+{
+	if (value.size() < suffix.size())
+		return false;
+	const size_t offset = value.size() - suffix.size();
+	for (size_t i = 0; i < suffix.size(); ++i) {
+		if (std::tolower(static_cast<unsigned char>(value[offset + i])) !=
+		    std::tolower(static_cast<unsigned char>(suffix[i]))) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static std::string UrlDecode(const std::string& input)
+{
+	std::string output;
+	output.reserve(input.size());
+
+	auto fromHex = [](char c) -> int {
+		if (c >= '0' && c <= '9')
+			return c - '0';
+		if (c >= 'a' && c <= 'f')
+			return c - 'a' + 10;
+		if (c >= 'A' && c <= 'F')
+			return c - 'A' + 10;
+		return -1;
+	};
+
+	for (size_t i = 0; i < input.size(); ++i) {
+		if (input[i] == '%' && i + 2 < input.size()) {
+			const int hi = fromHex(input[i + 1]);
+			const int lo = fromHex(input[i + 2]);
+			if (hi >= 0 && lo >= 0) {
+				output.push_back(static_cast<char>((hi << 4) | lo));
+				i += 2;
+				continue;
+			}
+		}
+		if (input[i] == '+') {
+			output.push_back(' ');
+			continue;
+		}
+		output.push_back(input[i]);
+	}
+	return output;
+}
+
+static std::string StripQueryAndFragment(const std::string& input)
+{
+	size_t end = input.size();
+	const size_t query = input.find('?');
+	if (query != std::string::npos) {
+		end = std::min(end, query);
+	}
+	const size_t fragment = input.find('#');
+	if (fragment != std::string::npos) {
+		end = std::min(end, fragment);
+	}
+	return input.substr(0, end);
+}
+
+static std::string BasenameFromPath(const std::string& path)
+{
+	const size_t slash = path.find_last_of('/');
+	if (slash == std::string::npos)
+		return path;
+	return path.substr(slash + 1);
+}
+
+static std::string NormalizeMapToken(const std::string& input)
+{
+	std::string out;
+	out.reserve(input.size());
+	bool prevSpace = true;
+	for (unsigned char ch : input) {
+		if (std::isalnum(ch)) {
+			out.push_back(static_cast<char>(std::tolower(ch)));
+			prevSpace = false;
+		} else if (!prevSpace) {
+			out.push_back(' ');
+			prevSpace = true;
+		}
+	}
+	if (!out.empty() && out.back() == ' ')
+		out.pop_back();
+	return out;
+}
+
+static std::vector<std::string> SplitTokens(const std::string& input)
+{
+	std::vector<std::string> tokens;
+	std::string token;
+	for (char ch : input) {
+		if (ch == ' ') {
+			if (!token.empty()) {
+				tokens.push_back(token);
+				token.clear();
+			}
+			continue;
+		}
+		token.push_back(ch);
+	}
+	if (!token.empty()) {
+		tokens.push_back(token);
+	}
+	return tokens;
+}
+
+static int MapNameScore(const std::string& requestedNorm, const std::string& candidateNorm)
+{
+	if (requestedNorm.empty() || candidateNorm.empty()) {
+		return 0;
+	}
+	if (requestedNorm == candidateNorm) {
+		return 10000;
+	}
+	if (candidateNorm.find(requestedNorm) != std::string::npos ||
+	    requestedNorm.find(candidateNorm) != std::string::npos) {
+		return 7000 - std::abs(static_cast<int>(requestedNorm.size()) - static_cast<int>(candidateNorm.size()));
+	}
+
+	const std::vector<std::string> reqTokens = SplitTokens(requestedNorm);
+	const std::vector<std::string> candTokens = SplitTokens(candidateNorm);
+	std::set<std::string> reqSet(reqTokens.begin(), reqTokens.end());
+	int common = 0;
+	for (const std::string& tok : candTokens) {
+		if (reqSet.find(tok) != reqSet.end()) {
+			++common;
+		}
+	}
+	if (common == 0) {
+		return 0;
+	}
+	const int tokenPenalty = std::abs(static_cast<int>(reqTokens.size()) - static_cast<int>(candTokens.size())) * 10;
+	const int lengthPenalty = std::abs(static_cast<int>(requestedNorm.size()) - static_cast<int>(candidateNorm.size()));
+	return common * 100 - tokenPenalty - lengthPenalty;
+}
+
+static std::vector<std::string> ExtractMapFilesFromListing(const std::string& listing, const std::string& baseUrl)
+{
+	std::set<std::string> files;
+	size_t pos = 0;
+
+	while ((pos = listing.find("href=", pos)) != std::string::npos) {
+		pos += 5;
+		if (pos >= listing.size()) {
+			break;
+		}
+
+		size_t start = pos;
+		size_t end = std::string::npos;
+		const char quote = listing[pos];
+		if (quote == '"' || quote == '\'') {
+			start = pos + 1;
+			end = listing.find(quote, start);
+		} else {
+			start = pos;
+			end = start;
+			while (end < listing.size() && !std::isspace(static_cast<unsigned char>(listing[end])) && listing[end] != '>') {
+				++end;
+			}
+		}
+		if (end == std::string::npos) {
+			break;
+		}
+
+		std::string href = StripQueryAndFragment(listing.substr(start, end - start));
+		pos = end + 1;
+		if (href.empty()) {
+			continue;
+		}
+
+		if (href.rfind("http://", 0) == 0 || href.rfind("https://", 0) == 0) {
+			if (href.rfind(baseUrl, 0) != 0) {
+				continue;
+			}
+			href = href.substr(baseUrl.size());
+		}
+
+		href = BasenameFromPath(href);
+		href = UrlDecode(href);
+		if (!EndsWithCaseInsensitive(href, ".sd7") && !EndsWithCaseInsensitive(href, ".sdz")) {
+			continue;
+		}
+		files.insert(href);
+	}
+
+	return std::vector<std::string>(files.begin(), files.end());
+}
+
+static bool SearchMapsFromCustomBase(std::list<IDownload*>& res, const std::string& requestedName)
+{
+	if (g_mapBaseUrl.empty()) {
+		return false;
+	}
+
+	std::string listing;
+	LOG_INFO("Map search: querying custom map index: %s", g_mapBaseUrl.c_str());
+	if (!CHttpDownloader::DownloadUrl(g_mapBaseUrl, listing)) {
+		LOG_WARN("Map search: custom map index request failed");
+		return false;
+	}
+
+	const std::vector<std::string> mapFiles = ExtractMapFilesFromListing(listing, g_mapBaseUrl);
+	if (mapFiles.empty()) {
+		LOG_WARN("Map search: no .sd7/.sdz files found on custom map index");
+		return false;
+	}
+
+	const std::string requestedNorm = NormalizeMapToken(requestedName);
+	int bestScore = 0;
+	std::string bestFile;
+
+	for (const std::string& file : mapFiles) {
+		const std::string lower = ToLowerAscii(file);
+		const size_t dot = lower.find_last_of('.');
+		if (dot == std::string::npos) {
+			continue;
+		}
+		const std::string fileBase = file.substr(0, dot);
+		const std::string candidateNorm = NormalizeMapToken(fileBase);
+		const int score = MapNameScore(requestedNorm, candidateNorm);
+		if (score > bestScore) {
+			bestScore = score;
+			bestFile = file;
+		}
+	}
+
+	if (bestFile.empty()) {
+		LOG_INFO("Map search: custom index had no matching file for '%s'", requestedName.c_str());
+		return false;
+	}
+
+	std::string filename = fileSystem->getSpringDir();
+	filename += PATH_DELIMITER;
+	filename += "maps";
+	filename += PATH_DELIMITER;
+	filename += CFileSystem::EscapeFilename(bestFile);
+
+	IDownload* dl = new IDownload(filename, requestedName, DownloadEnum::CAT_MAP);
+	dl->addMirror(g_mapBaseUrl + bestFile);
+	res.push_back(dl);
+
+	LOG_INFO("Map search: matched custom map '%s' -> %s", bestFile.c_str(), (g_mapBaseUrl + bestFile).c_str());
+	return true;
+}
 
 static bool IsEngineCategory(DownloadEnum::Category cat)
 {
@@ -446,6 +723,9 @@ bool CHttpDownloader::ParseResult(const std::string& /*name*/,
 
 		const DownloadEnum::Category cat = DownloadEnum::getCatFromStr(category);
 		IDownload* dl = new IDownload(filename, springname, cat);
+		if (category == "map" && !g_mapBaseUrl.empty() && resfile["filename"].isString()) {
+			dl->addMirror(g_mapBaseUrl + resfile["filename"].asString());
+		}
 		const Json::Value mirrors = resfile["mirrors"];
 		for (Json::Value::ArrayIndex j = 0; j < mirrors.size(); j++) {
 			if (!mirrors[j].isString()) {
@@ -487,6 +767,11 @@ bool CHttpDownloader::search(std::list<IDownload*>& res,
 	LOG_DEBUG("%s", name.c_str());
 	bool ok = false;
 
+	// For maps, prefer custom map base URL as primary source.
+	if (cat == DownloadEnum::CAT_MAP && SearchMapsFromCustomBase(res, name)) {
+		return true;
+	}
+
 	// For BAR engines, prefer BAR GitHub releases over SpringFiles.
 	// (BAR uses date-like versions such as YYYY.MM.DD / YYYY.MM.DD.PATCHSET).
 	const std::string token = NormalizeEngineVersionToken(name);
@@ -500,7 +785,7 @@ bool CHttpDownloader::search(std::list<IDownload*>& res,
 
 	std::string dlres;
 	const std::string url = getRequestUrl(name, cat);
-	LOG_INFO("Engine search: querying SpringFiles: %s", url.c_str());
+	LOG_INFO("Content search: querying SpringFiles: %s", url.c_str());
 	if (DownloadUrl(url, dlres) && ParseResult(name, dlres, res)) {
 		ok = !res.empty();
 	}
@@ -511,6 +796,16 @@ bool CHttpDownloader::search(std::list<IDownload*>& res,
 	}
 
 	return ok;
+}
+
+bool CHttpDownloader::setOption(const std::string& key, const std::string& value)
+{
+	if (key == "map_base_url") {
+		g_mapBaseUrl = NormalizeBaseUrl(value);
+		LOG_INFO("setOption %s = %s", key.c_str(), g_mapBaseUrl.c_str());
+		return true;
+	}
+	return IDownloader::setOption(key, value);
 }
 
 static size_t multi_write_data(void* ptr, size_t size, size_t nmemb,

@@ -5,7 +5,7 @@ if(${CMAKE_CROSSCOMPILING})
 	set(Boost_USE_STATIC_LIBS ON)
 	set(Boost_USE_STATIC_RUNTIME ON)
 endif()
-find_package(Boost 1.40.0 COMPONENTS system REQUIRED)
+find_package(Boost 1.40.0 COMPONENTS thread filesystem REQUIRED)
 
 #----------------------------------------------------------------------------------------------------
 # Options, that can be changed be the User in order to customise libSpringLobby

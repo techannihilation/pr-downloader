@@ -37,8 +37,13 @@ bool SpringBundle::GetBundleVersion()
 
 	version = getspringversion();
 	if (isspringreleaseversion && getspringversionpatcheset && isspringreleaseversion()) {
-		version += ".";
-		version += getspringversionpatcheset();
+		const std::string patchset = getspringversionpatcheset();
+		if (!patchset.empty()) {
+			const std::string suffix = "." + patchset;
+			if (version.size() < suffix.size() || version.compare(version.size() - suffix.size(), suffix.size(), suffix) != 0) {
+				version += suffix;
+			}
+		}
 	}
 	_FreeLibrary(temphandle);
 	return !version.empty();

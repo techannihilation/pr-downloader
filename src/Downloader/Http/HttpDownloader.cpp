@@ -3,10 +3,12 @@
 #include "HttpDownloader.h"
 
 #include <algorithm>
+#include <cctype>
 #include <stdio.h>
 #include <string>
 #include <sstream>
 #include <stdlib.h>
+#include <vector>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -25,6 +27,299 @@
 #include "Logger.h"
 #include "Downloader/Mirror.h"
 #include "Downloader/CurlWrapper.h"
+
+static bool IsEngineCategory(DownloadEnum::Category cat)
+{
+	switch (cat) {
+		case DownloadEnum::CAT_ENGINE:
+		case DownloadEnum::CAT_ENGINE_LINUX:
+		case DownloadEnum::CAT_ENGINE_LINUX64:
+		case DownloadEnum::CAT_ENGINE_WINDOWS:
+		case DownloadEnum::CAT_ENGINE_WINDOWS64:
+		case DownloadEnum::CAT_ENGINE_MACOSX:
+			return true;
+		default:
+			return false;
+	}
+}
+
+static std::string CollapseWhitespace(const std::string& input)
+{
+	std::string out;
+	out.reserve(input.size());
+
+	bool inWhitespace = true;
+	for (unsigned char ch : input) {
+		if (std::isspace(ch)) {
+			inWhitespace = true;
+			continue;
+		}
+		if (!out.empty() && inWhitespace) {
+			out.push_back(' ');
+		}
+		inWhitespace = false;
+		out.push_back(static_cast<char>(ch));
+	}
+	return out;
+}
+
+static std::string NormalizeEngineVersionToken(std::string version)
+{
+	version = CollapseWhitespace(version);
+	if (version.rfind("spring ", 0) == 0) {
+		version.erase(0, 7);
+	}
+	const std::string::size_type spacePos = version.find(' ');
+	const std::string token = (spacePos == std::string::npos) ? version : version.substr(0, spacePos);
+
+	// Normalize date-style versions like YYYY.M.D(.0) to YYYY.MM.DD
+	auto isDigits = [](const std::string& s) -> bool {
+		if (s.empty())
+			return false;
+		for (unsigned char ch : s) {
+			if (!std::isdigit(ch))
+				return false;
+		}
+		return true;
+	};
+
+	auto splitDot = [](const std::string& s) -> std::vector<std::string> {
+		std::vector<std::string> parts;
+		std::string cur;
+		for (char ch : s) {
+			if (ch == '.') {
+				parts.push_back(cur);
+				cur.clear();
+			} else {
+				cur.push_back(ch);
+			}
+		}
+		parts.push_back(cur);
+		return parts;
+	};
+
+	const auto parts = splitDot(token);
+	const bool maybeDate = (parts.size() == 3 || parts.size() == 4);
+	if (maybeDate && parts[0].size() == 4 && isDigits(parts[0]) && isDigits(parts[1]) && isDigits(parts[2])) {
+		const int month = std::stoi(parts[1]);
+		const int day = std::stoi(parts[2]);
+		const bool hasOptionalZeroSuffix = (parts.size() == 4);
+		const bool optionalZeroIsValid = (!hasOptionalZeroSuffix) || parts[3] == "0";
+
+		if (month >= 1 && month <= 12 && day >= 1 && day <= 31 && optionalZeroIsValid) {
+			auto pad2 = [](int value) -> std::string {
+				std::string s = std::to_string(value);
+				if (s.size() == 1)
+					return "0" + s;
+				return s;
+			};
+			return parts[0] + "." + pad2(month) + "." + pad2(day);
+		}
+	}
+
+	return token;
+}
+
+static bool ContainsCaseInsensitive(const std::string& haystack, const std::string& needle)
+{
+	if (needle.empty())
+		return true;
+	if (haystack.size() < needle.size())
+		return false;
+	for (size_t i = 0; i + needle.size() <= haystack.size(); ++i) {
+		bool ok = true;
+		for (size_t j = 0; j < needle.size(); ++j) {
+			if (std::tolower(static_cast<unsigned char>(haystack[i + j])) != std::tolower(static_cast<unsigned char>(needle[j]))) {
+				ok = false;
+				break;
+			}
+		}
+		if (ok)
+			return true;
+	}
+	return false;
+}
+
+static bool ParseBarSpringAssetName(const std::string& assetName, bool& isBar105, std::string& versionOut, std::string& platformOut)
+{
+	const std::string prefixBar = "spring_bar_.BAR.";
+	const std::string prefixBar105 = "spring_bar_.BAR105.";
+	std::string prefix;
+	if (assetName.rfind(prefixBar105, 0) == 0) {
+		isBar105 = true;
+		prefix = prefixBar105;
+	} else if (assetName.rfind(prefixBar, 0) == 0) {
+		isBar105 = false;
+		prefix = prefixBar;
+	} else {
+		return false;
+	}
+
+	const auto underscorePos = assetName.find('_', prefix.size());
+	if (underscorePos == std::string::npos)
+		return false;
+
+	const auto suffixPos = assetName.rfind(".7z");
+	if (suffixPos == std::string::npos || suffixPos <= underscorePos)
+		return false;
+
+	versionOut = assetName.substr(prefix.size(), underscorePos - prefix.size());
+	platformOut = assetName.substr(underscorePos + 1, suffixPos - (underscorePos + 1));
+	return !versionOut.empty() && !platformOut.empty();
+}
+
+static bool ParseRecoilEngineAssetName(const std::string& assetName, std::string& versionOut, std::string& platformOut)
+{
+	// Current BAR engine assets are distributed from beyond-all-reason/RecoilEngine with names like:
+	// recoil_2025.06.14_amd64-linux.7z
+	// recoil_2025.06.14_amd64-windows.7z
+	const std::string prefix = "recoil_";
+	if (assetName.rfind(prefix, 0) != 0) {
+		return false;
+	}
+	if (assetName.find("dbgsym") != std::string::npos) {
+		return false;
+	}
+	if (assetName.find("tracy") != std::string::npos) {
+		return false;
+	}
+
+	const auto afterPrefix = prefix.size();
+	const auto underscorePos = assetName.find('_', afterPrefix);
+	if (underscorePos == std::string::npos) {
+		return false;
+	}
+	const auto suffixPos = assetName.rfind(".7z");
+	if (suffixPos == std::string::npos || suffixPos <= underscorePos) {
+		return false;
+	}
+
+	versionOut = assetName.substr(afterPrefix, underscorePos - afterPrefix);
+	platformOut = assetName.substr(underscorePos + 1, suffixPos - (underscorePos + 1));
+	return !versionOut.empty() && !platformOut.empty();
+}
+
+static bool BarPlatformMatches(DownloadEnum::Category cat, const std::string& platformToken)
+{
+	auto startsWith = [](const std::string& s, const std::string& prefix) -> bool {
+		return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
+	};
+
+	switch (cat) {
+		case DownloadEnum::CAT_ENGINE_LINUX64:
+			return startsWith(platformToken, "linux-64-minimal-portable");
+		case DownloadEnum::CAT_ENGINE_LINUX:
+			return startsWith(platformToken, "linux-32-minimal-portable") || startsWith(platformToken, "linux32-minimal-portable");
+		case DownloadEnum::CAT_ENGINE_WINDOWS64:
+			return startsWith(platformToken, "windows-64-minimal-portable");
+		case DownloadEnum::CAT_ENGINE_WINDOWS:
+			return startsWith(platformToken, "windows-32-minimal-portable") || startsWith(platformToken, "windows32-minimal-portable");
+		case DownloadEnum::CAT_ENGINE_MACOSX:
+			return startsWith(platformToken, "macos");
+		default:
+			return false;
+	}
+}
+
+static bool RecoilPlatformMatches(DownloadEnum::Category cat, const std::string& platformToken)
+{
+	switch (cat) {
+		case DownloadEnum::CAT_ENGINE_LINUX64:
+			return platformToken == "amd64-linux";
+		case DownloadEnum::CAT_ENGINE_WINDOWS64:
+			return platformToken == "amd64-windows";
+		default:
+			return false;
+	}
+}
+
+static bool SearchBarGithubSpringReleases(std::list<IDownload*>& res, const std::string& requestedName, DownloadEnum::Category cat)
+{
+	// The historical repo was beyond-all-reason/spring, but it currently redirects/releases from RecoilEngine.
+	const std::string apiUrl = "https://api.github.com/repos/beyond-all-reason/RecoilEngine/releases?per_page=100";
+	std::string json;
+	CHttpDownloader http;
+	LOG_INFO("Engine search: querying BAR GitHub spring releases: %s", apiUrl.c_str());
+	if (!http.DownloadUrl(apiUrl, json)) {
+		LOG_WARN("Engine search: BAR GitHub spring releases request failed");
+		return false;
+	}
+
+	Json::Value root;
+	Json::Reader reader;
+	if (!reader.parse(json, root) || !root.isArray()) {
+		LOG_WARN("Engine search: BAR GitHub spring releases JSON parse failed");
+		return false;
+	}
+
+	const bool wantBar105 = ContainsCaseInsensitive(requestedName, "BAR105");
+	const std::string requestedToken = NormalizeEngineVersionToken(requestedName);
+
+	bool added = false;
+	for (Json::Value::ArrayIndex i = 0; i < root.size(); ++i) {
+		const Json::Value release = root[i];
+		const Json::Value assets = release["assets"];
+		if (!assets.isArray())
+			continue;
+
+		for (Json::Value::ArrayIndex j = 0; j < assets.size(); ++j) {
+			const Json::Value asset = assets[j];
+			if (!asset.isObject())
+				continue;
+
+			const Json::Value nameV = asset["name"];
+			const Json::Value urlV = asset["browser_download_url"];
+			if (!nameV.isString() || !urlV.isString())
+				continue;
+
+			const std::string assetName = nameV.asString();
+			const std::string downloadUrl = urlV.asString();
+
+			std::string assetVersion;
+			std::string platformToken;
+
+			// Support both legacy spring_bar_.BAR.* assets and current RecoilEngine recoil_* assets.
+			bool matchedFormat = false;
+			if (assetName.rfind("recoil_", 0) == 0) {
+				matchedFormat = ParseRecoilEngineAssetName(assetName, assetVersion, platformToken) && RecoilPlatformMatches(cat, platformToken);
+				// BAR105 is a legacy naming variant; recoil_ assets don't encode BAR/BAR105.
+				if (wantBar105) {
+					matchedFormat = false;
+				}
+			} else {
+				bool isBar105 = false;
+				matchedFormat = ParseBarSpringAssetName(assetName, isBar105, assetVersion, platformToken) && BarPlatformMatches(cat, platformToken) && (wantBar105 == isBar105);
+			}
+
+			if (!matchedFormat) {
+				continue;
+			}
+
+			const std::string normalizedAssetVersion = NormalizeEngineVersionToken(assetVersion);
+			if (normalizedAssetVersion != requestedToken)
+				continue;
+
+			std::string filename = fileSystem->getSpringDir();
+			filename += PATH_DELIMITER;
+			filename += "engine";
+			filename += PATH_DELIMITER;
+			filename += CFileSystem::EscapeFilename(assetName);
+
+			IDownload* dl = new IDownload(filename, requestedName, cat);
+			dl->addMirror(downloadUrl);
+			// Ensure extracted engine folder name matches what the lobby expects for this battle/version.
+			dl->version = requestedName;
+			res.push_back(dl);
+			added = true;
+			LOG_INFO("Engine search: matched BAR GitHub asset '%s' -> %s", assetName.c_str(), downloadUrl.c_str());
+		}
+	}
+
+	if (!added) {
+		LOG_INFO("Engine search: no BAR GitHub assets matched for '%s'", requestedName.c_str());
+	}
+	return added;
+}
 
 static size_t WriteMemoryCallback(void* contents, size_t size, size_t nmemb,
 				  void* userp)
@@ -190,13 +485,32 @@ bool CHttpDownloader::search(std::list<IDownload*>& res,
 			     DownloadEnum::Category cat)
 {
 	LOG_DEBUG("%s", name.c_str());
+	bool ok = false;
+
+	// For BAR engines, prefer BAR GitHub releases over SpringFiles.
+	// (BAR uses date-like versions such as YYYY.MM.DD / YYYY.MM.DD.PATCHSET).
+	const std::string token = NormalizeEngineVersionToken(name);
+	const bool looksDateLike = token.size() >= 10 && token[4] == '.' && std::isdigit(static_cast<unsigned char>(token[0])) && std::isdigit(static_cast<unsigned char>(token[1])) && std::isdigit(static_cast<unsigned char>(token[2])) && std::isdigit(static_cast<unsigned char>(token[3]));
+	if (IsEngineCategory(cat) && (looksDateLike || ContainsCaseInsensitive(name, "BAR"))) {
+		ok = SearchBarGithubSpringReleases(res, name, cat) || ok;
+		if (!res.empty()) {
+			return true;
+		}
+	}
+
 	std::string dlres;
 	const std::string url = getRequestUrl(name, cat);
-	if (!DownloadUrl(url, dlres)) {
-		LOG_ERROR("Error downloading %s %s", url.c_str(), dlres.c_str());
-		return false;
+	LOG_INFO("Engine search: querying SpringFiles: %s", url.c_str());
+	if (DownloadUrl(url, dlres) && ParseResult(name, dlres, res)) {
+		ok = !res.empty();
 	}
-	return ParseResult(name, dlres, res);
+
+	// Backwards-compatible fallback: if SpringFiles has no engines but this looks like BAR, try GitHub.
+	if (IsEngineCategory(cat) && res.empty() && ContainsCaseInsensitive(name, "BAR")) {
+		ok = SearchBarGithubSpringReleases(res, name, cat) || ok;
+	}
+
+	return ok;
 }
 
 static size_t multi_write_data(void* ptr, size_t size, size_t nmemb,
@@ -457,6 +771,10 @@ bool CHttpDownloader::processMessages(CURLM* curlm,
 		switch (msg->msg) {
 			case CURLMSG_DONE: { // a piece has been downloaded, verify it
 				DownloadData* data = getDataByHandle(downloads, msg->easy_handle);
+				if (data == nullptr) {
+					LOG_ERROR("Couldn't find download in download list");
+					return true;
+				}
 				switch (msg->data.result) {
 					case CURLE_OK:
 						break;
@@ -467,21 +785,37 @@ bool CHttpDownloader::processMessages(CURLM* curlm,
 						curl_easy_getinfo(msg->easy_handle, CURLINFO_RESPONSE_CODE, &http_code);
 						LOG_ERROR("CURL error(%d:%d): %s %d (%s)", msg->msg, msg->data.result,
 							  curl_easy_strerror(msg->data.result), http_code,
-							  data->mirror->url.c_str());
+							  data->mirror != nullptr ? data->mirror->url.c_str() : "<unknown>");
 						if (data->start_piece >= 0) {
 							data->download->pieces[data->start_piece].state =
 							    IDownload::STATE_NONE;
 						}
-						data->mirror->status = Mirror::STATUS_BROKEN;
+						if (data->mirror != nullptr) {
+							data->mirror->status = Mirror::STATUS_BROKEN;
+						}
 						// FIXME: cleanup curl handle here + process next dl
 				}
-				if (data == nullptr) {
-					LOG_ERROR("Couldn't find download in download list");
-					return false;
+
+				if (data->start_piece < 0) { // single-piece download (no ranges/pieces)
+					if (msg->data.result == CURLE_OK) {
+						data->download->state = IDownload::STATE_FINISHED;
+						showProcess(data->download, true);
+						double dlSpeed = 0.0;
+						curl_easy_getinfo(data->curlw->GetHandle(), CURLINFO_SPEED_DOWNLOAD_T, &dlSpeed);
+						if (data->mirror != nullptr) {
+							data->mirror->UpdateSpeed(dlSpeed);
+							if (data->mirror->status == Mirror::STATUS_UNKNOWN) {
+								data->mirror->status = Mirror::STATUS_OK;
+							}
+						}
+						LOG_INFO("single piece finished");
+					}
+
+					curl_multi_remove_handle(curlm, data->curlw->GetHandle());
+					data->curlw = nullptr;
+					break;
 				}
-				if (data->start_piece < 0) { // download without pieces
-					return false;
-				}
+
 				assert(data->download->file != nullptr);
 				assert(data->start_piece < (int)data->download->pieces.size());
 

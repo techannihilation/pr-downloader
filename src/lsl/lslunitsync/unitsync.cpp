@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <cstdlib>
 #include <clocale>
 #include <set>
 #include <dirent.h>
@@ -52,6 +53,31 @@
 namespace LSL
 {
 
+static bool IsLikelyCrashingBarUnitsyncPath(const std::string& unitsyncPath)
+{
+	const char* blacklist = std::getenv("SPRINGLOBBY_UNITSYNC_BLACKLIST_BAR_2025");
+	if (blacklist == nullptr || std::string(blacklist) != "1") {
+		return false;
+	}
+
+	// BAR/RecoilEngine 2025.* engine bundles ship a unitsync that can abort the host process in Init()
+	// on some distros/toolchains. We detect these via their standard folder naming and avoid loading.
+	//
+	// Example: ~/.spring/engine/linux64/spring 2025.06.05/libunitsync.so
+	std::string p = unitsyncPath;
+	boost::algorithm::to_lower(p);
+	if (p.find("/engine/") == std::string::npos) {
+		return false;
+	}
+	if (p.find("/spring 2025.") != std::string::npos) {
+		return true;
+	}
+	if (p.find("recoil") != std::string::npos && p.find("libunitsync") != std::string::npos) {
+		return true;
+	}
+	return false;
+}
+
 Unitsync::Unitsync()
     : m_cache_thread(new WorkerThread)
     , supportsManualUnLoad(false) //new style fetching (>= spring 101.0)
@@ -93,6 +119,16 @@ bool CompareStringNoCase(const std::string& first, const std::string& second)
 bool Unitsync::LoadUnitSyncLib(const std::string& unitsyncloc)
 {
 	LOCK_UNITSYNC;
+
+	if (IsLikelyCrashingBarUnitsyncPath(unitsyncloc)) {
+		if (IsLoaded()) {
+			LslWarning("Skipping unitsync reload for '%s' (known to crash); keeping current unitsync loaded", unitsyncloc.c_str());
+			return true;
+		}
+		LslWarning("Skipping unitsync load for '%s' (known to crash); unitsync remains unavailable", unitsyncloc.c_str());
+		return false;
+	}
+
 	ClearCache();
 	const bool ret = susynclib().Load(unitsyncloc);
 	if (!ret) {
@@ -326,7 +362,16 @@ std::string Unitsync::GetMapHash(const std::string& name)
 	if (itor != m_maps_list.end()) {
 		return itor->second;
 	}
-	const unsigned int modhash = susynclib().GetMapChecksumFromName(name);
+
+	// BAR/RecoilEngine 2025.* unitsync crashes inside GetMapChecksumFromName() for some inputs
+	// (stack-smashing protection). Avoid it by mapping the name back to the unitsync map index and
+	// using GetMapChecksum(index) instead.
+	const int mapIndex = Util::IndexInSequence(m_unsorted_map_array, name);
+	if (mapIndex < 0) {
+		LslWarning("GetMapHash: map not found in unitsync index list: %s", name.c_str());
+		return "";
+	}
+	const unsigned int modhash = susynclib().GetMapChecksum(mapIndex);
 	assert(modhash > 0);
 	const std::string strhash = LSL::Util::ToUIntString(modhash);
 	m_maps_list[name] = strhash;

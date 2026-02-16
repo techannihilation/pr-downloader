@@ -139,7 +139,10 @@ void UnitsyncLib::_Init()
 {
 	if (IsLoaded() && m_init != NULL) {
 		m_current_mod.clear();
-		const int res = m_init(true, 1);
+		// BAR/RecoilEngine 2025.* unitsync can abort with stack-smashing protection
+		// when initialized as "server". Initializing as client is sufficient for the
+		// lobby and avoids the crashing code path.
+		const int res = m_init(false, 1);
 		if (res == 0) {
 			LslError("Unitsync init failed!");
 		}
@@ -274,8 +277,13 @@ std::string UnitsyncLib::GetSpringVersion()
 	InitLib(m_get_spring_version);
 	std::string version = Util::SafeString(m_get_spring_version());
 	if (m_is_spring_release_version && m_get_spring_version_patchset && m_is_spring_release_version()) {
-		version += ".";
-		version += m_get_spring_version_patchset();
+		const std::string patchset = Util::SafeString(m_get_spring_version_patchset());
+		if (!patchset.empty()) {
+			const std::string suffix = "." + patchset;
+			if (version.size() < suffix.size() || version.compare(version.size() - suffix.size(), suffix.size(), suffix) != 0) {
+				version += suffix;
+			}
+		}
 	}
 	return version;
 }

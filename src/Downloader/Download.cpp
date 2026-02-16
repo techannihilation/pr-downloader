@@ -70,6 +70,15 @@ Mirror* IDownload::getFastestMirror()
 	}
 	if (pos < 0) {
 		LOG_DEBUG("no mirror selected");
+		// If all mirrors were marked broken, allow retry by resetting their status.
+		// This is especially important for downloads that only have a single mirror.
+		if (!mirrors.empty()) {
+			for (Mirror* mirror : mirrors) {
+				mirror->status = Mirror::STATUS_UNKNOWN;
+			}
+			mirrors[0]->status = Mirror::STATUS_OK;
+			return mirrors[0];
+		}
 		return nullptr;
 	}
 	LOG_DEBUG("Fastest mirror %d: (%d): %s", pos, mirrors[pos]->maxspeed,

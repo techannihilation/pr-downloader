@@ -1,6 +1,8 @@
 /* This file is part of pr-downloader (GPL v2 or later), see the LICENSE file */
 
 #include "RapidDownloader.h"
+#include "GitRapidBuilder.h"
+#include "GitRapidResolver.h"
 #include "FileSystem/FileSystem.h"
 #include "Util.h"
 #include "Logger.h"
@@ -8,9 +10,11 @@
 #include "Sdp.h"
 
 #include <stdio.h>
+#include <cstdlib>
 #include <string>
 #include <string.h>
 #include <list>
+#include <vector>
 #include <zlib.h>
 #include <algorithm> //std::min
 #include <set>
@@ -20,6 +24,46 @@
 #endif
 #undef min
 #undef max
+
+namespace {
+
+static bool ParseBool(const std::string& value)
+{
+	if (value == "1" || value == "true" || value == "yes" || value == "on") {
+		return true;
+	}
+	if (value == "0" || value == "false" || value == "no" || value == "off") {
+		return false;
+	}
+	return !value.empty();
+}
+
+static int ParseInt(const std::string& value, int fallback)
+{
+	char* end = nullptr;
+	const long parsed = std::strtol(value.c_str(), &end, 10);
+	if (end == nullptr || *end != '\0') {
+		return fallback;
+	}
+	if (parsed <= 0) {
+		return fallback;
+	}
+	return static_cast<int>(parsed);
+}
+
+static std::string JoinDepends(const std::vector<std::string>& depends)
+{
+	std::string out;
+	for (size_t i = 0; i < depends.size(); ++i) {
+		if (i > 0) {
+			out.push_back('|');
+		}
+		out += depends[i];
+	}
+	return out;
+}
+
+} // namespace
 
 CRapidDownloader::CRapidDownloader()
     : reposgzurl(REPO_MASTER)
@@ -52,12 +96,14 @@ bool CRapidDownloader::download_name(IDownload* download, int reccounter,
 		return false;
 	LOG_DEBUG("Using rapid to download %s", download->name.c_str());
 	std::set<std::string> downloaded;
+	bool matched = false;
 
 	for (CSdp& sdp : sdps) {
 		if (!match_download_name(sdp.getName(),
 					 name.empty() ? download->name : name)) {
 			continue;
 		}
+		matched = true;
 
 		// already downloaded, skip (i.e. stable entries are // twice in versions.gz)
 		if (downloaded.find(sdp.getMD5()) != downloaded.end()) {
@@ -77,7 +123,93 @@ bool CRapidDownloader::download_name(IDownload* download, int reccounter,
 			return false;
 		}
 	}
+	return matched;
+}
+
+bool CRapidDownloader::IsGitCandidate(const std::string& name,
+				      DownloadEnum::Category cat) const
+{
+	if (!rapidGitEnabled || rapidGitManifestUrl.empty()) {
+		return false;
+	}
+	if (!(cat == DownloadEnum::CAT_GAME || cat == DownloadEnum::CAT_COUNT ||
+	      cat == DownloadEnum::CAT_NONE)) {
+		return false;
+	}
+	if (name.empty() || name == "*") {
+		return false;
+	}
+	return name.find(':') != std::string::npos;
+}
+
+bool CRapidDownloader::TryResolveViaGit(const std::string& tag)
+{
+	if (!IsGitCandidate(tag, DownloadEnum::CAT_GAME)) {
+		return false;
+	}
+
+	if (rapidGitResolvedTags.find(tag) != rapidGitResolvedTags.end()) {
+		return true;
+	}
+
+	GitRapidResolver resolver(rapidGitApiTimeoutSeconds);
+	GitRapidVersionInfo version;
+	std::string error;
+	if (!resolver.Resolve(rapidGitManifestUrl, rapidGitManifestTtlSeconds, tag,
+			      version, error)) {
+		LOG_INFO("Git rapid resolve failed for '%s': %s", tag.c_str(),
+			 error.c_str());
+		return false;
+	}
+
+	GitRapidBuilder builder(rapidGitApiTimeoutSeconds);
+	GitRapidBuildResult buildResult;
+	if (!builder.Build(version, buildResult, error)) {
+		LOG_WARN("Git rapid build failed for '%s': %s", tag.c_str(),
+			 error.c_str());
+		return false;
+	}
+
+	const std::string displayName =
+	    version.displayName.empty() ? tag : version.displayName;
+	for (auto it = sdps.begin(); it != sdps.end();) {
+		if (it->getShortName() == tag) {
+			it = sdps.erase(it);
+			continue;
+		}
+		++it;
+	}
+	addRemoteSdp(
+	    CSdp { tag, buildResult.sdpMd5, displayName, JoinDepends(version.depends), "" });
+	rapidGitResolvedTags.insert(tag);
+
+	LOG_INFO("Git rapid resolved %s -> %s.sdp", tag.c_str(),
+		 buildResult.sdpMd5.c_str());
 	return true;
+}
+
+void CRapidDownloader::CollectSearchResults(std::list<IDownload*>& result,
+					    const std::string& name,
+					    DownloadEnum::Category cat) const
+{
+	std::set<std::string> added;
+	for (const CSdp& sdp : sdps) {
+		if (!match_download_name(sdp.getShortName(), name) &&
+		    !match_download_name(sdp.getName(), name)) {
+			continue;
+		}
+
+		const std::string key = sdp.getShortName();
+		if (added.find(key) != added.end()) {
+			continue;
+		}
+		added.insert(key);
+
+		IDownload* dl =
+		    new IDownload(sdp.getName().c_str(), name, cat, IDownload::TYP_RAPID);
+		dl->addMirror(sdp.getShortName().c_str());
+		result.push_back(dl);
+	}
 }
 
 bool CRapidDownloader::search(std::list<IDownload*>& result,
@@ -85,17 +217,25 @@ bool CRapidDownloader::search(std::list<IDownload*>& result,
 			      DownloadEnum::Category cat)
 {
 	LOG_DEBUG("%s", name.c_str());
-	updateRepos(name);
+	bool usedGit = false;
+	if (IsGitCandidate(name, cat)) {
+		usedGit = TryResolveViaGit(name);
+	}
+	if (!usedGit) {
+		updateRepos(name);
+	}
 	sdps.sort(list_compare);
-	for (const CSdp& sdp : sdps) {
-		if (match_download_name(sdp.getShortName(), name) ||
-		    (match_download_name(sdp.getName(), name))) {
-			IDownload* dl =
-			    new IDownload(sdp.getName().c_str(), name, cat, IDownload::TYP_RAPID);
-			dl->addMirror(sdp.getShortName().c_str());
-			result.push_back(dl);
+	CollectSearchResults(result, name, cat);
+
+	if (result.empty() && usedGit) {
+		LOG_INFO("Git rapid yielded no matches for '%s', falling back to repos.gz",
+			 name.c_str());
+		if (updateRepos(name)) {
+			sdps.sort(list_compare);
+			CollectSearchResults(result, name, cat);
 		}
 	}
+
 	return true;
 }
 
@@ -106,7 +246,20 @@ bool CRapidDownloader::download(IDownload* download, int /*max_parallel*/)
 		LOG_DEBUG("skipping non rapid-dl");
 		return true;
 	}
-	updateRepos(download->origin_name);
+
+	bool triedGit = false;
+	if (IsGitCandidate(download->origin_name, download->cat)) {
+		triedGit = true;
+		if (TryResolveViaGit(download->origin_name) && download_name(download, 0)) {
+			return true;
+		}
+		LOG_INFO("Git rapid download fallback to repos.gz for '%s'",
+			 download->origin_name.c_str());
+	}
+
+	if (!updateRepos(download->origin_name) && !triedGit) {
+		return false;
+	}
 	return download_name(download, 0);
 }
 
@@ -138,6 +291,28 @@ bool CRapidDownloader::setOption(const std::string& key,
 		return true;
 	}
 	if (key == "forceupdate") {
+		rapidGitResolvedTags.clear();
+		return true;
+	}
+	if (key == "git_enabled") {
+		rapidGitEnabled = ParseBool(value);
+		rapidGitResolvedTags.clear();
+		return true;
+	}
+	if (key == "git_manifest_url") {
+		rapidGitManifestUrl = value;
+		rapidGitResolvedTags.clear();
+		return true;
+	}
+	if (key == "git_manifest_ttl") {
+		rapidGitManifestTtlSeconds =
+		    ParseInt(value, rapidGitManifestTtlSeconds);
+		rapidGitResolvedTags.clear();
+		return true;
+	}
+	if (key == "git_api_timeout") {
+		rapidGitApiTimeoutSeconds =
+		    ParseInt(value, rapidGitApiTimeoutSeconds);
 		return true;
 	}
 	return IDownloader::setOption(key, value);

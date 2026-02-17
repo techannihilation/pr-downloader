@@ -112,6 +112,12 @@ bool CSdp::download(IDownload* dl)
 		LOG_ERROR("Creating pool directories failed");
 		return false;
 	}
+	if (count == 0) {
+		LOG_DEBUG("All files already available in local pool for %s", md5.c_str());
+		downloaded = true;
+		dl->state = IDownload::STATE_FINISHED;
+		return true;
+	}
 	if (!downloadStream()) {
 		LOG_ERROR("Couldn't download files for %s", md5.c_str());
 		fileSystem->removeFile(sdpPath);

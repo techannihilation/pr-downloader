@@ -29,7 +29,7 @@
 #include "Downloader/Mirror.h"
 #include "Downloader/CurlWrapper.h"
 
-static std::string g_mapBaseUrl;
+static std::vector<std::string> g_mapBaseUrls;
 
 static std::string NormalizeBaseUrl(std::string url)
 {
@@ -47,6 +47,40 @@ static std::string NormalizeBaseUrl(std::string url)
 		url.push_back('/');
 	}
 	return url;
+}
+
+static void AppendUniqueUrl(std::vector<std::string>& urls, const std::string& url)
+{
+	if (url.empty()) {
+		return;
+	}
+	if (std::find(urls.begin(), urls.end(), url) != urls.end()) {
+		return;
+	}
+	urls.push_back(url);
+}
+
+static std::vector<std::string> ParseBaseUrlList(const std::string& value)
+{
+	std::vector<std::string> urls;
+	std::string token;
+	token.reserve(value.size());
+
+	auto flushToken = [&]() {
+		const std::string normalized = NormalizeBaseUrl(token);
+		AppendUniqueUrl(urls, normalized);
+		token.clear();
+	};
+
+	for (char ch : value) {
+		if (ch == '\n' || ch == '\r' || ch == ',' || ch == ';') {
+			flushToken();
+			continue;
+		}
+		token.push_back(ch);
+	}
+	flushToken();
+	return urls;
 }
 
 static std::string ToLowerAscii(std::string s)
@@ -248,22 +282,25 @@ static std::vector<std::string> ExtractMapFilesFromListing(const std::string& li
 	return std::vector<std::string>(files.begin(), files.end());
 }
 
-static bool SearchMapsFromCustomBase(std::list<IDownload*>& res, const std::string& requestedName)
+static bool SearchMapsFromCustomBaseUrl(std::list<IDownload*>& res,
+					const std::string& requestedName,
+					const std::string& baseUrl)
 {
-	if (g_mapBaseUrl.empty()) {
+	if (baseUrl.empty()) {
 		return false;
 	}
 
 	std::string listing;
-	LOG_INFO("Map search: querying custom map index: %s", g_mapBaseUrl.c_str());
-	if (!CHttpDownloader::DownloadUrl(g_mapBaseUrl, listing)) {
-		LOG_WARN("Map search: custom map index request failed");
+	LOG_INFO("Map search: querying custom map index: %s", baseUrl.c_str());
+	if (!CHttpDownloader::DownloadUrl(baseUrl, listing)) {
+		LOG_WARN("Map search: custom map index request failed: %s", baseUrl.c_str());
 		return false;
 	}
 
-	const std::vector<std::string> mapFiles = ExtractMapFilesFromListing(listing, g_mapBaseUrl);
+	const std::vector<std::string> mapFiles = ExtractMapFilesFromListing(listing, baseUrl);
 	if (mapFiles.empty()) {
-		LOG_WARN("Map search: no .sd7/.sdz files found on custom map index");
+		LOG_WARN("Map search: no .sd7/.sdz files found on custom map index: %s",
+			 baseUrl.c_str());
 		return false;
 	}
 
@@ -298,11 +335,23 @@ static bool SearchMapsFromCustomBase(std::list<IDownload*>& res, const std::stri
 	filename += CFileSystem::EscapeFilename(bestFile);
 
 	IDownload* dl = new IDownload(filename, requestedName, DownloadEnum::CAT_MAP);
-	dl->addMirror(g_mapBaseUrl + bestFile);
+	dl->addMirror(baseUrl + bestFile);
 	res.push_back(dl);
 
-	LOG_INFO("Map search: matched custom map '%s' -> %s", bestFile.c_str(), (g_mapBaseUrl + bestFile).c_str());
+	LOG_INFO("Map search: matched custom map '%s' -> %s", bestFile.c_str(),
+		 (baseUrl + bestFile).c_str());
 	return true;
+}
+
+static bool SearchMapsFromCustomBase(std::list<IDownload*>& res,
+				     const std::string& requestedName)
+{
+	for (const std::string& baseUrl : g_mapBaseUrls) {
+		if (SearchMapsFromCustomBaseUrl(res, requestedName, baseUrl)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 static bool IsEngineCategory(DownloadEnum::Category cat)
@@ -723,8 +772,10 @@ bool CHttpDownloader::ParseResult(const std::string& /*name*/,
 
 		const DownloadEnum::Category cat = DownloadEnum::getCatFromStr(category);
 		IDownload* dl = new IDownload(filename, springname, cat);
-		if (category == "map" && !g_mapBaseUrl.empty() && resfile["filename"].isString()) {
-			dl->addMirror(g_mapBaseUrl + resfile["filename"].asString());
+		if (category == "map" && resfile["filename"].isString()) {
+			for (const std::string& baseUrl : g_mapBaseUrls) {
+				dl->addMirror(baseUrl + resfile["filename"].asString());
+			}
 		}
 		const Json::Value mirrors = resfile["mirrors"];
 		for (Json::Value::ArrayIndex j = 0; j < mirrors.size(); j++) {
@@ -801,8 +852,16 @@ bool CHttpDownloader::search(std::list<IDownload*>& res,
 bool CHttpDownloader::setOption(const std::string& key, const std::string& value)
 {
 	if (key == "map_base_url") {
-		g_mapBaseUrl = NormalizeBaseUrl(value);
-		LOG_INFO("setOption %s = %s", key.c_str(), g_mapBaseUrl.c_str());
+		g_mapBaseUrls.clear();
+		AppendUniqueUrl(g_mapBaseUrls, NormalizeBaseUrl(value));
+		LOG_INFO("setOption %s = %s", key.c_str(),
+			 g_mapBaseUrls.empty() ? "" : g_mapBaseUrls.front().c_str());
+		return true;
+	}
+	if (key == "map_base_urls") {
+		g_mapBaseUrls = ParseBaseUrlList(value);
+		LOG_INFO("setOption %s count = %d", key.c_str(),
+			 static_cast<int>(g_mapBaseUrls.size()));
 		return true;
 	}
 	return IDownloader::setOption(key, value);

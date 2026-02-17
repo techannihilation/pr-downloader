@@ -15,6 +15,8 @@ endif()
 
 add_library(Downloader STATIC
 	Downloader/Rapid/RapidDownloader.cpp
+	Downloader/Rapid/GitRapidResolver.cpp
+	Downloader/Rapid/GitRapidBuilder.cpp
 	Downloader/Rapid/Repo.cpp
 	Downloader/Rapid/Sdp.cpp
 	Downloader/Http/HttpDownloader.cpp
@@ -248,4 +250,3 @@ if(RAPIDTOOLS)
 	add_executable(Streamer Streamer.cpp)
 	target_link_libraries(Streamer Rapid)
 endif()
-

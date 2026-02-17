@@ -7,6 +7,7 @@
 
 #include <string>
 #include <list>
+#include <set>
 #include <stdio.h>
 
 #define REPO_MASTER_RECHECK_TIME \
@@ -50,11 +51,21 @@ private:
   */
 	void downloadRepo(const std::string& url);
 	bool updateRepos(const std::string& searchstr);
+	bool TryResolveViaGit(const std::string& tag);
+	bool IsGitCandidate(const std::string& name, DownloadEnum::Category cat) const;
+	void CollectSearchResults(std::list<IDownload*>& result,
+				  const std::string& name,
+				  DownloadEnum::Category cat) const;
 	bool parse();
 	bool UpdateReposGZ();
 	std::string path;
 	std::string reposgzurl;
 	std::list<CRepo> repos;
+	bool rapidGitEnabled = true;
+	std::string rapidGitManifestUrl;
+	int rapidGitManifestTtlSeconds = 300;
+	int rapidGitApiTimeoutSeconds = 20;
+	std::set<std::string> rapidGitResolvedTags;
 
 	/**
           download by name, for example "Complete Annihilation revision 1234"

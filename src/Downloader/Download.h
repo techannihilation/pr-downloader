@@ -90,6 +90,7 @@ public:
 	DownloadData* write_only_from = nullptr;
 
 	bool validateTLS = true;
+	int timeoutSeconds = 0;
 private:
 	std::vector<Mirror*> mirrors;
 	static void initCategories();

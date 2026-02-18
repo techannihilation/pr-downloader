@@ -290,6 +290,10 @@ bool CRapidDownloader::setOption(const std::string& key,
 		reposgzurl = value;
 		return true;
 	}
+	if (key == "repo_timeout_seconds") {
+		repoHttpTimeoutSeconds = ParseInt(value, 0);
+		return true;
+	}
 	if (key == "forceupdate") {
 		rapidGitResolvedTags.clear();
 		return true;
@@ -334,6 +338,7 @@ bool CRapidDownloader::UpdateReposGZ()
 		return true;
 	IDownload dl(path);
 	dl.addMirror(reposgzurl);
+	dl.timeoutSeconds = repoHttpTimeoutSeconds;
 	return httpDownload->download(&dl) && parse();
 }
 
@@ -405,6 +410,7 @@ bool CRapidDownloader::updateRepos(const std::string& searchstr)
 			delete dl;
 			continue;
 		}
+		dl->timeoutSeconds = repoHttpTimeoutSeconds;
 		usedrepos.push_back(&repo);
 		dls.push_back(dl);
 	}

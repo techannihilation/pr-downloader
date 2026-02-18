@@ -33,7 +33,8 @@ public:
 			      int max_parallel = 10) override;
 	virtual bool setOption(const std::string& key, const std::string& value) override;
 	void showProcess(IDownload* download, bool forceOutput);
-	static bool DownloadUrl(const std::string& url, std::string& res);
+	static bool DownloadUrl(const std::string& url, std::string& res,
+			       long timeoutSeconds = 0);
 	static bool ParseResult(const std::string& name, const std::string& json,
 				std::list<IDownload*>& res);
 

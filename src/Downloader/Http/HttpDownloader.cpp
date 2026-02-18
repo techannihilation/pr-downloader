@@ -30,6 +30,7 @@
 #include "Downloader/CurlWrapper.h"
 
 static std::vector<std::string> g_mapBaseUrls;
+static long g_mapDownloadTimeoutSeconds = 0;
 
 static std::string NormalizeBaseUrl(std::string url)
 {
@@ -81,6 +82,16 @@ static std::vector<std::string> ParseBaseUrlList(const std::string& value)
 	}
 	flushToken();
 	return urls;
+}
+
+static long ParsePositiveLong(const std::string& value, long fallback)
+{
+	char* end = nullptr;
+	const long parsed = strtol(value.c_str(), &end, 10);
+	if (end == nullptr || *end != '\0' || parsed <= 0) {
+		return fallback;
+	}
+	return parsed;
 }
 
 static std::string ToLowerAscii(std::string s)
@@ -292,7 +303,7 @@ static bool SearchMapsFromCustomBaseUrl(std::list<IDownload*>& res,
 
 	std::string listing;
 	LOG_INFO("Map search: querying custom map index: %s", baseUrl.c_str());
-	if (!CHttpDownloader::DownloadUrl(baseUrl, listing)) {
+	if (!CHttpDownloader::DownloadUrl(baseUrl, listing, g_mapDownloadTimeoutSeconds)) {
 		LOG_WARN("Map search: custom map index request failed: %s", baseUrl.c_str());
 		return false;
 	}
@@ -678,7 +689,8 @@ static int progress_func(DownloadData* data, double total, double done, double,
 }
 
 // downloads url into res
-bool CHttpDownloader::DownloadUrl(const std::string& url, std::string& res)
+bool CHttpDownloader::DownloadUrl(const std::string& url, std::string& res,
+				  long timeoutSeconds)
 {
 	DownloadData d;
 	d.got_ranges = false;
@@ -694,12 +706,20 @@ bool CHttpDownloader::DownloadUrl(const std::string& url, std::string& res)
 	curl_easy_setopt(curlw.GetHandle(), CURLOPT_PROGRESSDATA, &d);
 	curl_easy_setopt(curlw.GetHandle(), CURLOPT_XFERINFOFUNCTION, progress_func);
 	curl_easy_setopt(curlw.GetHandle(), CURLOPT_NOPROGRESS, 0L);
+	if (timeoutSeconds > 0) {
+		curl_easy_setopt(curlw.GetHandle(), CURLOPT_TIMEOUT, timeoutSeconds);
+		curl_easy_setopt(curlw.GetHandle(), CURLOPT_CONNECTTIMEOUT, timeoutSeconds);
+		curl_easy_setopt(curlw.GetHandle(), CURLOPT_LOW_SPEED_TIME, timeoutSeconds);
+	}
 	const CURLcode curlres = curl_easy_perform(curlw.GetHandle());
 
 	delete d.download;
 	d.download = nullptr;
 	if (curlres != CURLE_OK) {
-		LOG_ERROR("Error in curl %s (%s)", curl_easy_strerror(curlres), curlw.GetError().c_str());
+		const long effectiveTimeout = (timeoutSeconds > 0) ? timeoutSeconds : 30;
+		LOG_ERROR("Error in curl %s (%s) [url=%s timeout=%lds]",
+			  curl_easy_strerror(curlres), curlw.GetError().c_str(),
+			  url.c_str(), effectiveTimeout);
 	}
 	return curlres == CURLE_OK;
 }
@@ -837,7 +857,8 @@ bool CHttpDownloader::search(std::list<IDownload*>& res,
 	std::string dlres;
 	const std::string url = getRequestUrl(name, cat);
 	LOG_INFO("Content search: querying SpringFiles: %s", url.c_str());
-	if (DownloadUrl(url, dlres) && ParseResult(name, dlres, res)) {
+	const long queryTimeout = (cat == DownloadEnum::CAT_MAP) ? g_mapDownloadTimeoutSeconds : 0;
+	if (DownloadUrl(url, dlres, queryTimeout) && ParseResult(name, dlres, res)) {
 		ok = !res.empty();
 	}
 
@@ -862,6 +883,11 @@ bool CHttpDownloader::setOption(const std::string& key, const std::string& value
 		g_mapBaseUrls = ParseBaseUrlList(value);
 		LOG_INFO("setOption %s count = %d", key.c_str(),
 			 static_cast<int>(g_mapBaseUrls.size()));
+		return true;
+	}
+	if (key == "map_download_timeout_seconds") {
+		g_mapDownloadTimeoutSeconds = ParsePositiveLong(value, 0);
+		LOG_INFO("setOption %s = %ld", key.c_str(), g_mapDownloadTimeoutSeconds);
 		return true;
 	}
 	return IDownloader::setOption(key, value);
@@ -1033,6 +1059,18 @@ bool CHttpDownloader::setupDownload(DownloadData* piece)
 	curl_easy_setopt(curle, CURLOPT_PROGRESSDATA, piece);
 	curl_easy_setopt(curle, CURLOPT_XFERINFOFUNCTION, progress_func);
 	curl_easy_setopt(curle, CURLOPT_URL, CurlWrapper::escapeUrl(piece->mirror->url).c_str());
+	long timeoutSeconds = 0;
+	if (piece->download->cat == DownloadEnum::CAT_MAP &&
+	    g_mapDownloadTimeoutSeconds > 0) {
+		timeoutSeconds = g_mapDownloadTimeoutSeconds;
+	} else if (piece->download->timeoutSeconds > 0) {
+		timeoutSeconds = piece->download->timeoutSeconds;
+	}
+	if (timeoutSeconds > 0) {
+		curl_easy_setopt(curle, CURLOPT_TIMEOUT, timeoutSeconds);
+		curl_easy_setopt(curle, CURLOPT_CONNECTTIMEOUT, timeoutSeconds);
+		curl_easy_setopt(curle, CURLOPT_LOW_SPEED_TIME, timeoutSeconds);
+	}
 
 	curl_easy_setopt(curle, CURLOPT_SSL_VERIFYPEER, piece->download->validateTLS);
 	LOG_DEBUG("Validating TLS: %d", piece->download->validateTLS);

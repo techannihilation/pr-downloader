@@ -61,6 +61,7 @@ private:
 	std::string path;
 	std::string reposgzurl;
 	std::list<CRepo> repos;
+	int repoHttpTimeoutSeconds = 0;
 	bool rapidGitEnabled = true;
 	std::string rapidGitManifestUrl;
 	int rapidGitManifestTtlSeconds = 300;

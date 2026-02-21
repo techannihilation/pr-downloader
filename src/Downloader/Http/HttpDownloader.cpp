@@ -9,6 +9,7 @@
 #include <sstream>
 #include <stdlib.h>
 #include <set>
+#include <map>
 #include <vector>
 
 #ifdef _WIN32
@@ -31,6 +32,20 @@
 
 static std::vector<std::string> g_mapBaseUrls;
 static long g_mapDownloadTimeoutSeconds = 0;
+static long g_engineDownloadTimeoutSeconds = 0;
+
+struct EngineProviderConfig
+{
+	std::string type;
+	std::string url;
+	std::string name;
+};
+
+static constexpr const char* kEngineProviderGithubReleases = "github_releases";
+static constexpr const char* kEngineProviderSpringFiles = "springfiles";
+static constexpr const char* kDefaultEngineGithubReleasesUrl = "https://api.github.com/repos/beyond-all-reason/RecoilEngine/releases?per_page=100";
+static constexpr const char* kDefaultEngineSpringFilesUrl = "https://springfiles.springrts.com/json.php";
+static std::vector<EngineProviderConfig> g_engineProviders;
 
 static std::string NormalizeBaseUrl(std::string url)
 {
@@ -94,12 +109,78 @@ static long ParsePositiveLong(const std::string& value, long fallback)
 	return parsed;
 }
 
+static std::vector<EngineProviderConfig> MakeDefaultEngineProviders()
+{
+	return {
+	    {kEngineProviderGithubReleases, kDefaultEngineGithubReleasesUrl, "BAR GitHub"},
+	    {kEngineProviderSpringFiles, kDefaultEngineSpringFilesUrl, "SpringFiles"},
+	};
+}
+
+static void EnsureEngineProvidersInitialized()
+{
+	if (g_engineProviders.empty()) {
+		g_engineProviders = MakeDefaultEngineProviders();
+	}
+}
+
 static std::string ToLowerAscii(std::string s)
 {
 	for (char& c : s) {
 		c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 	}
 	return s;
+}
+
+static bool ParseEngineProvidersOption(const std::string& value,
+				       std::vector<EngineProviderConfig>& providersOut,
+				       std::string& errorOut)
+{
+	Json::Value root;
+	Json::Reader reader;
+	if (!reader.parse(value, root) || !root.isArray()) {
+		errorOut = "engine_providers must be a JSON array";
+		return false;
+	}
+
+	std::set<std::string> seen;
+	for (Json::Value::ArrayIndex i = 0; i < root.size(); ++i) {
+		const Json::Value item = root[i];
+		if (!item.isObject()) {
+			errorOut = "engine provider entry must be an object";
+			return false;
+		}
+		if (!item["type"].isString() || !item["url"].isString()) {
+			errorOut = "engine provider requires string type and url";
+			return false;
+		}
+
+		EngineProviderConfig provider;
+		provider.type = ToLowerAscii(item["type"].asString());
+		provider.url = item["url"].asString();
+		provider.name = item["name"].isString() ? item["name"].asString() : "";
+
+		if (provider.type != kEngineProviderGithubReleases &&
+		    provider.type != kEngineProviderSpringFiles) {
+			errorOut = "unsupported engine provider type: " + provider.type;
+			return false;
+		}
+		if (provider.url.empty()) {
+			errorOut = "engine provider url cannot be empty";
+			return false;
+		}
+
+		const std::string dedupeKey = provider.type + "\n" + provider.url;
+		if (seen.insert(dedupeKey).second) {
+			providersOut.push_back(std::move(provider));
+		}
+	}
+
+	if (providersOut.empty()) {
+		errorOut = "engine providers array is empty";
+		return false;
+	}
+	return true;
 }
 
 static bool EndsWithCaseInsensitive(const std::string& value, const std::string& suffix)
@@ -570,22 +651,29 @@ static bool RecoilPlatformMatches(DownloadEnum::Category cat, const std::string&
 	}
 }
 
-static bool SearchBarGithubSpringReleases(std::list<IDownload*>& res, const std::string& requestedName, DownloadEnum::Category cat)
+static bool SearchBarGithubSpringReleases(std::list<IDownload*>& res,
+					  const std::string& requestedName,
+					  DownloadEnum::Category cat,
+					  const std::string& apiUrl,
+					  long timeoutSeconds,
+					  const std::string& providerName)
 {
-	// The historical repo was beyond-all-reason/spring, but it currently redirects/releases from RecoilEngine.
-	const std::string apiUrl = "https://api.github.com/repos/beyond-all-reason/RecoilEngine/releases?per_page=100";
 	std::string json;
 	CHttpDownloader http;
-	LOG_INFO("Engine search: querying BAR GitHub spring releases: %s", apiUrl.c_str());
-	if (!http.DownloadUrl(apiUrl, json)) {
-		LOG_WARN("Engine search: BAR GitHub spring releases request failed");
+	const std::string label = providerName.empty() ? apiUrl : providerName;
+	LOG_INFO("Engine search: querying GitHub provider '%s': %s",
+		 label.c_str(), apiUrl.c_str());
+	if (!http.DownloadUrl(apiUrl, json, timeoutSeconds)) {
+		LOG_WARN("Engine search: GitHub provider request failed: %s",
+			 label.c_str());
 		return false;
 	}
 
 	Json::Value root;
 	Json::Reader reader;
 	if (!reader.parse(json, root) || !root.isArray()) {
-		LOG_WARN("Engine search: BAR GitHub spring releases JSON parse failed");
+		LOG_WARN("Engine search: GitHub provider JSON parse failed: %s",
+			 label.c_str());
 		return false;
 	}
 
@@ -648,12 +736,14 @@ static bool SearchBarGithubSpringReleases(std::list<IDownload*>& res, const std:
 			dl->version = requestedName;
 			res.push_back(dl);
 			added = true;
-			LOG_INFO("Engine search: matched BAR GitHub asset '%s' -> %s", assetName.c_str(), downloadUrl.c_str());
+			LOG_INFO("Engine search: matched GitHub asset '%s' -> %s",
+				 assetName.c_str(), downloadUrl.c_str());
 		}
 	}
 
 	if (!added) {
-		LOG_INFO("Engine search: no BAR GitHub assets matched for '%s'", requestedName.c_str());
+		LOG_INFO("Engine search: no GitHub assets matched for '%s' (provider: %s)",
+			 requestedName.c_str(), label.c_str());
 	}
 	return added;
 }
@@ -724,10 +814,16 @@ bool CHttpDownloader::DownloadUrl(const std::string& url, std::string& res,
 	return curlres == CURLE_OK;
 }
 
-static std::string getRequestUrl(const std::string& name,
+static std::string getRequestUrl(const std::string& searchBaseUrl,
+				 const std::string& name,
 				 DownloadEnum::Category cat)
 {
-	std::string url = HTTP_SEARCH_URL + std::string("?");
+	std::string url = searchBaseUrl;
+	if (url.find('?') == std::string::npos) {
+		url.push_back('?');
+	} else if (!url.empty() && url.back() != '?' && url.back() != '&') {
+		url.push_back('&');
+	}
 	if (cat != DownloadEnum::CAT_NONE) {
 		url += "category=" + DownloadEnum::getCat(cat) + std::string("&");
 	}
@@ -843,28 +939,51 @@ bool CHttpDownloader::search(std::list<IDownload*>& res,
 		return true;
 	}
 
-	// For BAR engines, prefer BAR GitHub releases over SpringFiles.
-	// (BAR uses date-like versions such as YYYY.MM.DD / YYYY.MM.DD.PATCHSET).
-	const std::string token = NormalizeEngineVersionToken(name);
-	const bool looksDateLike = token.size() >= 10 && token[4] == '.' && std::isdigit(static_cast<unsigned char>(token[0])) && std::isdigit(static_cast<unsigned char>(token[1])) && std::isdigit(static_cast<unsigned char>(token[2])) && std::isdigit(static_cast<unsigned char>(token[3]));
-	if (IsEngineCategory(cat) && (looksDateLike || ContainsCaseInsensitive(name, "BAR"))) {
-		ok = SearchBarGithubSpringReleases(res, name, cat) || ok;
-		if (!res.empty()) {
-			return true;
+	if (IsEngineCategory(cat)) {
+		EnsureEngineProvidersInitialized();
+		for (const EngineProviderConfig& provider : g_engineProviders) {
+			if (provider.type == kEngineProviderGithubReleases) {
+				if (SearchBarGithubSpringReleases(
+					res, name, cat, provider.url,
+					g_engineDownloadTimeoutSeconds,
+					provider.name)) {
+					return true;
+				}
+				continue;
+			}
+
+			if (provider.type == kEngineProviderSpringFiles) {
+				const std::string url = getRequestUrl(provider.url, name, cat);
+				const std::string label = provider.name.empty()
+							      ? provider.url
+							      : provider.name;
+				LOG_INFO("Engine search: querying SpringFiles provider '%s': %s",
+					 label.c_str(), url.c_str());
+
+				std::string dlres;
+				if (!DownloadUrl(url, dlres, g_engineDownloadTimeoutSeconds)) {
+					continue;
+				}
+
+				std::list<IDownload*> providerResults;
+				if (ParseResult(name, dlres, providerResults) &&
+				    !providerResults.empty()) {
+					res.splice(res.end(), providerResults);
+					return true;
+				}
+				IDownloader::freeResult(providerResults);
+			}
 		}
+
+		return false;
 	}
 
 	std::string dlres;
-	const std::string url = getRequestUrl(name, cat);
+	const std::string url = getRequestUrl(HTTP_SEARCH_URL, name, cat);
 	LOG_INFO("Content search: querying SpringFiles: %s", url.c_str());
 	const long queryTimeout = (cat == DownloadEnum::CAT_MAP) ? g_mapDownloadTimeoutSeconds : 0;
 	if (DownloadUrl(url, dlres, queryTimeout) && ParseResult(name, dlres, res)) {
 		ok = !res.empty();
-	}
-
-	// Backwards-compatible fallback: if SpringFiles has no engines but this looks like BAR, try GitHub.
-	if (IsEngineCategory(cat) && res.empty() && ContainsCaseInsensitive(name, "BAR")) {
-		ok = SearchBarGithubSpringReleases(res, name, cat) || ok;
 	}
 
 	return ok;
@@ -888,6 +1007,25 @@ bool CHttpDownloader::setOption(const std::string& key, const std::string& value
 	if (key == "map_download_timeout_seconds") {
 		g_mapDownloadTimeoutSeconds = ParsePositiveLong(value, 0);
 		LOG_INFO("setOption %s = %ld", key.c_str(), g_mapDownloadTimeoutSeconds);
+		return true;
+	}
+	if (key == "engine_download_timeout_seconds") {
+		g_engineDownloadTimeoutSeconds = ParsePositiveLong(value, 0);
+		LOG_INFO("setOption %s = %ld", key.c_str(), g_engineDownloadTimeoutSeconds);
+		return true;
+	}
+	if (key == "engine_providers") {
+		std::vector<EngineProviderConfig> providers;
+		std::string error;
+		if (!ParseEngineProvidersOption(value, providers, error)) {
+			LOG_ERROR("setOption %s parse failed: %s. Falling back to defaults.",
+				  key.c_str(), error.c_str());
+			g_engineProviders = MakeDefaultEngineProviders();
+			return false;
+		}
+		g_engineProviders = std::move(providers);
+		LOG_INFO("setOption %s count = %d", key.c_str(),
+			 static_cast<int>(g_engineProviders.size()));
 		return true;
 	}
 	return IDownloader::setOption(key, value);
@@ -1063,6 +1201,9 @@ bool CHttpDownloader::setupDownload(DownloadData* piece)
 	if (piece->download->cat == DownloadEnum::CAT_MAP &&
 	    g_mapDownloadTimeoutSeconds > 0) {
 		timeoutSeconds = g_mapDownloadTimeoutSeconds;
+	} else if (IsEngineCategory(piece->download->cat) &&
+		   g_engineDownloadTimeoutSeconds > 0) {
+		timeoutSeconds = g_engineDownloadTimeoutSeconds;
 	} else if (piece->download->timeoutSeconds > 0) {
 		timeoutSeconds = piece->download->timeoutSeconds;
 	}

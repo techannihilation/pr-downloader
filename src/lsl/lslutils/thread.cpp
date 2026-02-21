@@ -70,7 +70,10 @@ bool WorkItemQueue::Remove(WorkItem* item)
 
 void WorkItemQueue::Cancel()
 {
-	m_dying = true;
+	{
+		std::scoped_lock lock(m_lock);
+		m_dying = true;
+	}
 	m_cond.notify_all(); // wake up worker thread
 }
 
@@ -115,29 +118,44 @@ WorkItemQueue::~WorkItemQueue()
 
 void WorkItemQueue::Process()
 {
-	while (!m_dying) {
+	while (true) {
 		WorkItem* item = NULL;
-		std::unique_lock<std::mutex> lock(m_mutex);
-		while ((!m_dying) && (item = Pop())) {
-			try {
-				//                LslDebug( "running WorkItem %p, prio = %d", item, item->m_priority );
-				item->Run();
-			} catch (std::exception& e) {
-				// better eat all exceptions thrown by WorkItem::Run(),
-				// don't want to let the thread die on a single faulty WorkItem.
-				LslDebug("WorkerThread caught exception thrown by WorkItem::Run -- %s", e.what());
-			} catch (...) {
-				LslDebug("WorkerThread caught exception thrown by WorkItem::Run");
+		{
+			std::unique_lock<std::mutex> lock(m_lock);
+			m_cond.wait(lock, [this]() {
+				return m_dying || !m_queue.empty();
+			});
+			if (m_dying) {
+				break;
 			}
-			CleanupWorkItem(item);
+			if (!m_queue.empty()) {
+				item = m_queue.front();
+				std::pop_heap(m_queue.begin(), m_queue.end(), WorkItemCompare());
+				m_queue.pop_back();
+				item->m_queue = NULL;
+			}
 		}
-		// cleanup leftover WorkItems
-		while ((item = Pop()) != NULL) {
-			CleanupWorkItem(item);
+
+		if (item == NULL) {
+			continue;
 		}
-		if (!m_dying)
-			//wait for the next Push
-			m_cond.wait(lock);
+
+		try {
+			//                LslDebug( "running WorkItem %p, prio = %d", item, item->m_priority );
+			item->Run();
+		} catch (std::exception& e) {
+			// better eat all exceptions thrown by WorkItem::Run(),
+			// don't want to let the thread die on a single faulty WorkItem.
+			LslDebug("WorkerThread caught exception thrown by WorkItem::Run -- %s", e.what());
+		} catch (...) {
+			LslDebug("WorkerThread caught exception thrown by WorkItem::Run");
+		}
+		CleanupWorkItem(item);
+	}
+
+	WorkItem* item = NULL;
+	while ((item = Pop()) != NULL) {
+		CleanupWorkItem(item);
 	}
 }
 

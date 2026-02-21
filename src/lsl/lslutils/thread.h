@@ -81,7 +81,6 @@ private:
 	friend class std::thread;
 	void CleanupWorkItem(WorkItem* item);
 
-	std::mutex m_mutex;
 	std::mutex m_lock;
 	std::condition_variable m_cond;
 	// this is a priority queue maintained as a heap stored in a vector :o

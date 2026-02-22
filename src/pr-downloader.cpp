@@ -11,6 +11,7 @@
 #include <assert.h>
 
 static bool fetchDepends = true;
+static int httpMaxParallel = 1;
 
 void SetDownloadListener(IDownloaderProcessUpdateListener listener)
 {
@@ -55,7 +56,7 @@ bool download_engine(std::list<IDownload*>& dllist)
 	if (enginedls.empty())
 		return res;
 
-	httpDownload->download(enginedls);
+	httpDownload->download(enginedls, httpMaxParallel);
 	for (const IDownload* dl : enginedls) {
 		if (!dl->isFinished())
 			continue;
@@ -184,6 +185,19 @@ bool DownloadSetConfig(CONFIG type, const void* value)
 		case CONFIG_RAPID_FORCEUPDATE:
 			rapidDownload->setOption("forceupdate", ""); // FIXME, use value
 			return true;
+		case CONFIG_HTTP_MAX_PARALLEL: {
+			if (value == nullptr) {
+				return false;
+			}
+			httpMaxParallel = *(const int*)value;
+			if (httpMaxParallel < 1) {
+				httpMaxParallel = 1;
+			}
+			if (httpMaxParallel > 32) {
+				httpMaxParallel = 32;
+			}
+			return true;
+		}
 	}
 	return false;
 }
@@ -200,6 +214,9 @@ bool DownloadGetConfig(CONFIG type, const void** value)
 		case CONFIG_RAPID_FORCEUPDATE:
 			// FIXME: implement
 			return false;
+		case CONFIG_HTTP_MAX_PARALLEL:
+			*value = (const int*)&httpMaxParallel;
+			return true;
 	}
 	return false;
 }
@@ -276,7 +293,7 @@ int DownloadStart()
 		return 1;
 	}
 	rapidDownload->download(dls);
-	httpDownload->download(dls, 1);
+	httpDownload->download(dls, httpMaxParallel);
 	download_engine(dls);
 	int res = 0;
 	for (const IDownload* dl: dls) {

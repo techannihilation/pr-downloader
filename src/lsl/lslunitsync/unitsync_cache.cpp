@@ -8,6 +8,7 @@
 #include <json/json.h>
 #include <lslutils/misc.h>
 #include <lslutils/logging.h>
+#include <memory>
 #include <sstream>
 
 
@@ -31,9 +32,12 @@ static bool ParseJsonFile(const std::string& path, Json::Value& root)
 		return false;
 	}
 	std::fclose(fp);
-	Json::Reader reader;
 	Json::Value tmp;
-	if (!reader.parse(s, tmp, false)) {
+	Json::CharReaderBuilder builder;
+	builder["collectComments"] = false;
+	std::string errs;
+	const std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
+	if (!reader || !reader->parse(s.data(), s.data() + s.size(), &tmp, &errs)) {
 		return false;
 	}
 	if (tmp["CacheVersion"] != CACHE_VERSION) {
@@ -113,7 +117,7 @@ void Cache::Set(const std::string& path, const MapInfo& info)
 	root["width"] = info.width;
 	root["height"] = info.height;
 	root["description"] = info.description;
-	for (StartPos pos : info.positions) {
+	for (const StartPos& pos : info.positions) {
 		Json::Value item;
 		item["x"] = pos.x;
 		item["y"] = pos.y;

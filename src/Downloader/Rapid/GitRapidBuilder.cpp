@@ -10,6 +10,7 @@
 #include <cstring>
 #include <limits>
 #include <list>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -164,8 +165,11 @@ bool GitRapidBuilder::DownloadBlob(const GitRapidFileInfo& file,
 	}
 
 	Json::Value root;
-	Json::Reader reader;
-	if (!reader.parse(dataOut, root)) {
+	Json::CharReaderBuilder builder;
+	builder["collectComments"] = false;
+	std::string errs;
+	const std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
+	if (!reader || !reader->parse(dataOut.data(), dataOut.data() + dataOut.size(), &root, &errs)) {
 		// Raw payload mode.
 		return true;
 	}

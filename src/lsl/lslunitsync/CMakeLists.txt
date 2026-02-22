@@ -26,6 +26,15 @@ if(ADD_WXCONVERT)
 	target_compile_definitions(lsl-unitsync PRIVATE -DHAVE_WX)
 endif()
 
+if(PRD_JSONCPP_INTERNAL)
+	# Suppress deprecation warnings coming from bundled jsoncpp legacy API
+	# implementation code (third-party).
+	set_source_files_properties(
+		${pr-downloader_SOURCE_DIR}/src/lib/jsoncpp/src/lib_json/json_reader.cpp
+		PROPERTIES COMPILE_FLAGS "-Wno-deprecated-declarations"
+	)
+endif()
+
 if(UNIX AND NOT MINGW AND NOT APPLE)
 	find_library(RT_LIBRARY rt)
 endif()
@@ -40,6 +49,11 @@ target_include_directories(lsl-unitsync
 	PRIVATE
 		${pr-downloader_SOURCE_DIR}/src
 		${pr-downloader_SOURCE_DIR}/src/lsl
-		${pr-downloader_SOURCE_DIR}/src/lib
 		${PRD_JSONCPP_INCLUDE_DIR}
+)
+
+# Third-party headers live under src/lib (e.g. CImg) and are treated as system
+# headers to avoid warning spam from external code.
+target_include_directories(lsl-unitsync SYSTEM PRIVATE
+	${pr-downloader_SOURCE_DIR}/src/lib
 )

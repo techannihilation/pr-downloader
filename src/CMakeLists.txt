@@ -11,6 +11,13 @@ if(PRD_JSONCPP_INTERNAL)
 		${CMAKE_CURRENT_SOURCE_DIR}/lib/jsoncpp/src/lib_json/json_value.cpp
 		${CMAKE_CURRENT_SOURCE_DIR}/lib/jsoncpp/src/lib_json/json_reader.cpp
 		${CMAKE_CURRENT_SOURCE_DIR}/lib/jsoncpp/src/lib_json/json_writer.cpp)
+
+	# jsoncpp's legacy Json::Reader implementation is marked deprecated in its
+	# own headers and triggers warnings when compiling the bundled sources.
+	set_source_files_properties(
+		${CMAKE_CURRENT_SOURCE_DIR}/lib/jsoncpp/src/lib_json/json_reader.cpp
+		PROPERTIES COMPILE_FLAGS "-Wno-deprecated-declarations"
+	)
 endif()
 
 add_library(Downloader STATIC

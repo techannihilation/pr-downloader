@@ -428,14 +428,17 @@ MapInfo UnitsyncLib::GetMapInfoEx(int index)
 				}
 				xset = true;
 				continue;
-			}
-			if (key == "zPos") {
-				assert(xset);
-				LSL::StartPos pos;
-				pos.x = x;
-				const std::string type = Util::SafeString(m_get_info_type(i));
-				if (type == "integer") {
-					pos.y = m_get_info_value_integer(i);
+				}
+				if (key == "zPos") {
+					if (!xset) {
+						LslWarning("Start position zPos encountered without a preceding xPos");
+						continue;
+					}
+					LSL::StartPos pos;
+					pos.x = x;
+					const std::string type = Util::SafeString(m_get_info_type(i));
+					if (type == "integer") {
+						pos.y = m_get_info_value_integer(i);
 				} else if (type == "float") {
 					pos.y = m_get_info_value_float(i);
 				} else {

@@ -150,8 +150,16 @@ CurlWrapper::CurlWrapper()
 	// then its aborted
 	curl_easy_setopt(handle, CURLOPT_LOW_SPEED_LIMIT, 10);
 	curl_easy_setopt(handle, CURLOPT_LOW_SPEED_TIME, 30);
+#if LIBCURL_VERSION_NUM >= 0x075500
+	curl_easy_setopt(handle, CURLOPT_PROTOCOLS_STR, "http,https");
+#else
 	curl_easy_setopt(handle, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+#endif
+#if LIBCURL_VERSION_NUM >= 0x075500
+	curl_easy_setopt(handle, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+#else
 	curl_easy_setopt(handle, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+#endif
 	curl_easy_setopt(handle, CURLOPT_USERAGENT, getVersion());
 	curl_easy_setopt(handle, CURLOPT_FAILONERROR, true);
 	curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 1);
@@ -205,4 +213,3 @@ std::string CurlWrapper::GetError() const
 		return "";
 	return std::string(errbuf, strlen(errbuf));
 }
-

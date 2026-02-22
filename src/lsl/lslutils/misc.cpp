@@ -100,8 +100,7 @@ std::string CanonicalizeName(const std::string& name, Category cat)
 #else  // !__UNIX__
 	lslUnusedVar(cat);
 #endif // __UNIX__/!__UNIX__
-	nameCanonic + name + GetDllExt();
-	return nameCanonic;
+	return nameCanonic + name + GetDllExt();
 }
 
 } //namespace Lib

@@ -115,7 +115,7 @@ class DataList : public Node
 {
 private:
 	std::map<std::string, PNode> nodes;
-	Node list_loop; // next is first, prev is last in the list
+	PNode list_loop; // next is first, prev is last in the list
 	typedef std::map<std::string, PNode>::iterator nodes_iterator;
 
 public:

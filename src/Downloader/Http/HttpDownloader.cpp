@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <set>
 #include <map>
+#include <memory>
 #include <vector>
 
 #ifdef _WIN32
@@ -137,8 +138,11 @@ static bool ParseEngineProvidersOption(const std::string& value,
 				       std::string& errorOut)
 {
 	Json::Value root;
-	Json::Reader reader;
-	if (!reader.parse(value, root) || !root.isArray()) {
+	Json::CharReaderBuilder builder;
+	builder["collectComments"] = false;
+	std::string errs;
+	const std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
+	if (!reader || !reader->parse(value.data(), value.data() + value.size(), &root, &errs) || !root.isArray()) {
 		errorOut = "engine_providers must be a JSON array";
 		return false;
 	}
@@ -670,8 +674,11 @@ static bool SearchBarGithubSpringReleases(std::list<IDownload*>& res,
 	}
 
 	Json::Value root;
-	Json::Reader reader;
-	if (!reader.parse(json, root) || !root.isArray()) {
+	Json::CharReaderBuilder builder;
+	builder["collectComments"] = false;
+	std::string errs;
+	const std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
+	if (!reader || !reader->parse(json.data(), json.data() + json.size(), &root, &errs) || !root.isArray()) {
 		LOG_WARN("Engine search: GitHub provider JSON parse failed: %s",
 			 label.c_str());
 		return false;
@@ -835,11 +842,14 @@ bool CHttpDownloader::ParseResult(const std::string& /*name*/,
 				  std::list<IDownload*>& res)
 {
 	Json::Value result; // will contains the root value after parsing.
-	Json::Reader reader;
-	const bool parsingSuccessful = reader.parse(json, result);
+	Json::CharReaderBuilder builder;
+	builder["collectComments"] = false;
+	std::string errs;
+	const std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
+	const bool parsingSuccessful = reader && reader->parse(json.data(), json.data() + json.size(), &result, &errs);
 	if (!parsingSuccessful) {
 		LOG_ERROR("Couldn't parse result: %s %s",
-			  reader.getFormattedErrorMessages().c_str(), json.c_str());
+			  errs.c_str(), json.c_str());
 		return false;
 	}
 

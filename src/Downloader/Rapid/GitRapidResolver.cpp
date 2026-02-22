@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
 
@@ -244,9 +245,12 @@ bool GitRapidResolver::ParseTag(const std::string& manifestJson,
 				std::string& errorOut) const
 {
 	Json::Value root;
-	Json::Reader reader;
-	if (!reader.parse(manifestJson, root)) {
-		errorOut = "manifest parse error: " + reader.getFormattedErrorMessages();
+	Json::CharReaderBuilder builder;
+	builder["collectComments"] = false;
+	std::string errs;
+	const std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
+	if (!reader || !reader->parse(manifestJson.data(), manifestJson.data() + manifestJson.size(), &root, &errs)) {
+		errorOut = "manifest parse error: " + errs;
 		return false;
 	}
 	if (!root.isObject()) {
@@ -321,8 +325,10 @@ bool GitRapidResolver::ParseTag(const std::string& manifestJson,
 	}
 
 	Json::Value treeRoot;
-	if (!reader.parse(treeJson, treeRoot)) {
-		errorOut = "tree parse error: " + reader.getFormattedErrorMessages();
+	std::string treeErrs;
+	const std::unique_ptr<Json::CharReader> treeReader(builder.newCharReader());
+	if (!treeReader || !treeReader->parse(treeJson.data(), treeJson.data() + treeJson.size(), &treeRoot, &treeErrs)) {
+		errorOut = "tree parse error: " + treeErrs;
 		return false;
 	}
 

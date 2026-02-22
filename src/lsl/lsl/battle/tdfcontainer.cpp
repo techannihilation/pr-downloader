@@ -464,10 +464,10 @@ void Node::Load(Tokenizer& /*unused*/)
 DataList::DataList()
 {
 	//parent = NULL;
-	list_loop.list_prev = &list_loop;
-	list_loop.list_next = &list_loop;
-	list_loop.parent = this;
-	list_loop.Reference();
+	list_loop = PNode(new Node());
+	list_loop->list_prev = list_loop.Ptr();
+	list_loop->list_next = list_loop.Ptr();
+	list_loop->parent = this;
 }
 
 DataList::~DataList()
@@ -491,7 +491,7 @@ bool DataList::Insert(PNode node) /// return false if such entry already exists.
 		return false;
 
 	node->parent = this;
-	node->ListInsertAfter(list_loop.list_prev);
+	node->ListInsertAfter(list_loop->list_prev);
 	return true;
 }
 
@@ -689,15 +689,15 @@ PNode DataList::Prev(PNode what)
 }
 PNode DataList::End()
 {
-	return PNode(&list_loop);
+	return list_loop;
 }
 PNode DataList::First()
 {
-	return PNode(list_loop.list_next);
+	return PNode(list_loop->list_next);
 }
 PNode DataList::Last()
 {
-	return PNode(list_loop.list_prev);
+	return PNode(list_loop->list_prev);
 }
 
 /*

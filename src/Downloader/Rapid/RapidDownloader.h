@@ -67,6 +67,7 @@ private:
 	int rapidGitManifestTtlSeconds = 300;
 	int rapidGitApiTimeoutSeconds = 20;
 	std::set<std::string> rapidGitResolvedTags;
+	bool forceUpdate = false;
 
 	/**
           download by name, for example "Complete Annihilation revision 1234"

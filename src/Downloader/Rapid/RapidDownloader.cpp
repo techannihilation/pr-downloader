@@ -295,6 +295,7 @@ bool CRapidDownloader::setOption(const std::string& key,
 		return true;
 	}
 	if (key == "forceupdate") {
+		forceUpdate = true;
 		rapidGitResolvedTags.clear();
 		return true;
 	}
@@ -324,6 +325,9 @@ bool CRapidDownloader::setOption(const std::string& key,
 
 bool CRapidDownloader::UpdateReposGZ()
 {
+	const bool force = forceUpdate;
+	forceUpdate = false;
+
 	std::string tmp;
 	if (!urlToPath(reposgzurl, tmp)) {
 		LOG_ERROR("Invalid path: %s", tmp.c_str());
@@ -334,7 +338,7 @@ bool CRapidDownloader::UpdateReposGZ()
 	fileSystem->createSubdirs(CFileSystem::DirName(path));
 	LOG_DEBUG("%s", reposgzurl.c_str());
 	// first try already downloaded file, as repo master file rarely changes
-	if ((fileSystem->fileExists(path)) && (!fileSystem->isOlder(path, REPO_MASTER_RECHECK_TIME)) && parse())
+	if (!force && (fileSystem->fileExists(path)) && (!fileSystem->isOlder(path, REPO_MASTER_RECHECK_TIME)) && parse())
 		return true;
 	IDownload dl(path);
 	dl.addMirror(reposgzurl);
